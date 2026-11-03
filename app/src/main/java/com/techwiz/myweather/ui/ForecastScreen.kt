@@ -25,10 +25,15 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Slider
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,7 +52,17 @@ import com.techwiz.myweather.data.DayInfo
 import com.techwiz.myweather.data.HourPoint
 import com.techwiz.myweather.data.WEATHER_MODELS
 import com.techwiz.myweather.domain.DEFAULT_KITES
+import com.techwiz.myweather.domain.Intensity
 import com.techwiz.myweather.domain.Level
+import com.techwiz.myweather.domain.RainOutlook
+import com.techwiz.myweather.domain.buildRainOutlook
+import com.techwiz.myweather.domain.intensityOf
+import com.techwiz.myweather.domain.rainConsensus
+import com.techwiz.myweather.domain.relativeTime
+import com.techwiz.myweather.domain.uvAdvice
+import com.techwiz.myweather.domain.uvLabel
+import com.techwiz.myweather.domain.weatherCodeText
+import com.techwiz.myweather.data.Forecast
 import com.techwiz.myweather.domain.Profile
 import com.techwiz.myweather.domain.Verdict
 import com.techwiz.myweather.domain.bestWindow
@@ -70,11 +85,15 @@ fun ForecastScreen(
     onProfile: (Profile) -> Unit,
     onGroundFactor: (Double) -> Unit,
     onRefresh: () -> Unit,
+    onAlertClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val fc = state.forecast
     if (fc == null) {
         Box(modifier.fillMaxSize().statusBarsPadding(), contentAlignment = Alignment.Center) {
+            Box(Modifier.align(Alignment.TopCenter).padding(16.dp)) {
+                AlertsBanner(state.alerts, onAlertClick, showAllClear = false)
+            }
             when {
                 state.loading -> CircularProgressIndicator()
                 state.error != null -> Column(
@@ -104,6 +123,7 @@ fun ForecastScreen(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        item { AlertsBanner(state.alerts, onAlertClick, showAllClear = true) }
         item {
             Column {
                 Text(fc.place.name, style = MaterialTheme.typography.headlineMedium)
@@ -127,6 +147,8 @@ fun ForecastScreen(
                 }
             }
         }
+        item { NowCard(fc, hours) }
+        item { RainCard(fc) }
         item { SummaryCard(profile, hours, verdicts) }
 
         if (profile == Profile.KITE) {
@@ -141,6 +163,8 @@ fun ForecastScreen(
         }
 
         item { WindCard(hours, hasComparison = fc.hasModelComparison) }
+
+        item { SunUvCard(fc, hours) }
 
         item {
             SectionCard("Hour by hour") {
@@ -161,7 +185,8 @@ fun ForecastScreen(
         }
         item {
             Text(
-                "Forecast data: Open-Meteo (ECMWF, NOAA GFS, DWD ICON). Wind shown is at 10 m.",
+                "Forecast data: Open-Meteo (ECMWF, NOAA GFS, DWD ICON). Wind shown is at 10 m." +
+                    (state.lastUpdated?.let { " Updated ${java.time.format.DateTimeFormatter.ofPattern("h:mm a", Locale.US).format(it.atZone(java.time.ZoneId.systemDefault()))}." } ?: ""),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 24.dp),
@@ -426,6 +451,12 @@ private fun HourCell(h: HourPoint, v: Verdict?) {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.primary,
         )
+        val amt = h.rainConsensus()
+        Text(
+            if (amt >= 0.005) "%.2f\"".format(amt) else "",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
         Spacer(Modifier.height(2.dp))
         Box(
             Modifier
@@ -461,6 +492,255 @@ private fun DayRow(d: DayInfo) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+    }
+}
+
+// ---- Right now ---------------------------------------------------------------------------
+
+@Composable
+private fun NowCard(fc: Forecast, hours: List<HourPoint>) {
+    val cur = fc.current
+    val h0 = hours.firstOrNull()
+    val temp = cur?.tempF ?: h0?.tempF
+    val feels = cur?.feelsF ?: h0?.feelsF
+    val code = cur?.weatherCode ?: h0?.weatherCode
+    val wind = cur?.windMph ?: h0?.windMph
+    val gust = cur?.gustMph ?: h0?.gustMph
+    SectionCard("Right now") {
+        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text(temp?.let { "${it.roundToInt()}°" } ?: "–", style = MaterialTheme.typography.displayMedium)
+            Column(Modifier.padding(bottom = 8.dp)) {
+                Text(weatherCodeText(code), style = MaterialTheme.typography.titleMedium)
+                feels?.let {
+                    Text("Feels like ${it.roundToInt()}°F", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        Text(
+            buildString {
+                wind?.let { append("Wind ${it.roundToInt()} mph") }
+                gust?.let { append(", gusts ${it.roundToInt()}") }
+                h0?.uv?.let { if (it >= 0.5) append("  ·  UV ${it.roundToInt()} (${uvLabel(it)})") }
+                h0?.cloudPct?.let { append("  ·  clouds ${it.roundToInt()}%") }
+            },
+            style = MaterialTheme.typography.bodyLarge,
+        )
+    }
+}
+
+// ---- Rain ---------------------------------------------------------------------------------
+
+@Composable
+private fun RainCard(fc: Forecast) {
+    val o: RainOutlook = remember(fc) { buildRainOutlook(fc) }
+    val now = fc.localNow()
+    var showInfo by remember { mutableStateOf(false) }
+    val hour0 = fc.upcoming().firstOrNull()
+
+    SectionCard("Rain") {
+        // Headline: what is happening, then what comes next.
+        val nowcastNext = o.next.firstOrNull { !it.time.isBefore(now) && it.precipIn >= 0.004 }
+        val headline = when {
+            o.rainingNow -> "Raining now: ${o.nowIntensity.label.lowercase(Locale.US)}"
+            nowcastNext != null -> "Dry now, rain ${relativeTime(nowcastNext.time, now)}"
+            o.events.isNotEmpty() -> "Dry now. Next rain ${relativeTime(o.events.first().start, now)}"
+            else -> "No rain expected in the next 48 hours"
+        }
+        Text(headline, style = MaterialTheme.typography.titleLarge)
+        val sub = buildList {
+            o.lastHourIn?.let { add("Past hour: ${"%.2f".format(it)} in") }
+            hour0?.precipProb?.let { add("Chance this hour: ${it.roundToInt()}%") }
+        }.joinToString("  ·  ")
+        if (sub.isNotEmpty()) {
+            Text(sub, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+
+        // 15-minute strip: last hour + next 4 hours.
+        if (fc.minutely.isNotEmpty()) {
+            NowcastBars(fc, now)
+        }
+
+        if (o.thunderFirst != null) {
+            Text(
+                "Thunderstorms possible ${relativeTime(o.thunderFirst, now)} (${o.thunderFirst.format(HOUR_FMT)})" +
+                    (o.capeMax24?.let { " · storm energy up to ${it.roundToInt()} J/kg" } ?: ""),
+                color = CautionColor,
+                style = MaterialTheme.typography.titleSmall,
+            )
+        }
+
+        // Amount over the next 24 h with the spread between models.
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Next 24 hours", style = MaterialTheme.typography.titleSmall)
+            if (o.total24Mean < 0.01) {
+                Text("Essentially dry (under 0.01 in)")
+            } else {
+                Text(
+                    "About ${"%.2f".format(o.total24Mean)} in" +
+                        if (o.total24ByModel.size > 1) "  (models range ${"%.2f".format(o.total24Min)} – ${"%.2f".format(o.total24Max)})" else "",
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                if (o.total24ByModel.size > 1) {
+                    Text(
+                        o.total24ByModel.entries.joinToString("  ·  ") { "${it.key} ${"%.2f".format(it.value)}\"" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    val spread = o.total24Max - o.total24Min
+                    if (spread > 0.25 * o.total24Mean && spread > 0.1) {
+                        Text(
+                            "Models disagree on the amount; treat it as a range, not a number.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = CautionColor,
+                        )
+                    }
+                }
+            }
+        }
+
+        // Wet spells.
+        o.events.take(4).forEach { e ->
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    "${e.start.format(DAY_FMT)} ${e.start.format(HOUR_FMT)} – ${e.end.format(HOUR_FMT)}",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                val lo = e.modelTotals.values.minOrNull()
+                val hi = e.modelTotals.values.maxOrNull()
+                Text(
+                    "${intensityOf(e.peakInPerHour).label}, about ${"%.2f".format(e.totalIn)} in" +
+                        if (lo != null && hi != null && e.modelTotals.size > 1) " (${"%.2f".format(lo)} – ${"%.2f".format(hi)})" else "",
+                )
+                val early = e.earliestModelStart
+                val late = e.latestModelStart
+                if (early != null && late != null && early != late) {
+                    Text(
+                        "Models disagree on timing: start between ${early.format(HOUR_FMT)} and ${late.format(HOUR_FMT)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        TextButton(onClick = { showInfo = true }) { Text("What does the rain % mean?") }
+    }
+
+    if (showInfo) {
+        AlertDialog(
+            onDismissRequest = { showInfo = false },
+            confirmButton = { TextButton(onClick = { showInfo = false }) { Text("Got it") } },
+            title = { Text("Rain: chance vs amount vs timing") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Chance (%): of many slightly different model runs, the share that put at least a " +
+                            "trace of rain (about 0.004 in) on this exact spot during that hour. 30% means " +
+                            "3 in 10 runs did. It is not \"30% of the area gets wet\", and it says nothing " +
+                            "about how much.",
+                    )
+                    Text(
+                        "Amount (inches): shown separately, from three models (ECMWF, GFS, ICON). When they " +
+                            "disagree you see the range instead of a made-up single number.",
+                    )
+                    Text(
+                        "Timing: the first few hours come from a 15-minute nowcast, which is the most " +
+                            "trustworthy for \"is it raining / about to rain\". Beyond about 12 hours, being " +
+                            "off by a few hours is normal; the app shows when models disagree about the start.",
+                    )
+                    Text(
+                        "Some other apps quote the US NWS \"PoP\", which blends confidence with how much of " +
+                            "the area gets rain, so the same percentage can mean something different.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun NowcastBars(fc: Forecast, now: java.time.LocalDateTime) {
+    val slots = fc.minutely
+    val peak = max(0.03, slots.maxOf { it.precipIn })
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            Modifier.fillMaxWidth().height(44.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            slots.forEach { slot ->
+                val past = slot.time.isBefore(now.minusMinutes(14))
+                val frac = (slot.precipIn / peak).coerceIn(0.0, 1.0).toFloat()
+                val color = when (intensityOf(slot.precipIn * 4)) {
+                    Intensity.NONE -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f)
+                    Intensity.TRACE, Intensity.LIGHT -> Color(0xFF64B5F6)
+                    Intensity.MODERATE -> Color(0xFF3D7BFF)
+                    Intensity.HEAVY -> Color(0xFFB04DFF)
+                }
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .height((4 + 40 * frac).dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(if (past) color.copy(alpha = 0.55f) else color),
+                )
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("1 h ago", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("now", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            Text("+4 h", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+// ---- UV & sun -----------------------------------------------------------------------------
+
+@Composable
+private fun SunUvCard(fc: Forecast, hours: List<HourPoint>) {
+    val today = fc.localNow().toLocalDate()
+    val day = fc.days.firstOrNull { it.date == today } ?: fc.days.firstOrNull()
+    val todays = fc.hours.filter { it.time.toLocalDate() == today && it.uv != null }
+    val peak = todays.maxByOrNull { it.uv ?: 0.0 }
+    val nowUv = hours.firstOrNull()?.uv
+    SectionCard("UV & sun") {
+        Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+            Column {
+                Text("Now", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    nowUv?.let { "${"%.1f".format(it)} · ${uvLabel(it)}" } ?: "–",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+            if (peak?.uv != null) {
+                Column {
+                    Text("Today's peak", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "${"%.1f".format(peak.uv)} · ${uvLabel(peak.uv)} at ${peak.time.format(HOUR_FMT)}",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+            }
+        }
+        peak?.uv?.let {
+            Text(uvAdvice(it), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text(
+            "UV already accounts for forecast cloud cover, so cloudy hours read lower.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (day?.sunrise != null && day.sunset != null) {
+            Text("Sunrise ${day.sunrise.format(TIME_FMT)}  ·  Sunset ${day.sunset.format(TIME_FMT)}")
         }
     }
 }

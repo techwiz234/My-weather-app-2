@@ -74,8 +74,17 @@ class WeatherRepository(
                 "precipitation_probability", "snowfall", "cloud_cover", "uv_index",
                 "visibility", "is_day", "wind_speed_10m", "wind_gusts_10m",
                 "wind_direction_10m", "wind_speed_80m", "wind_speed_120m", "wind_speed_180m",
+                "weather_code", "cape",
             ).joinToString(","),
         )
+        .addQueryParameter(
+            "current",
+            "temperature_2m,apparent_temperature,precipitation,weather_code," +
+                "wind_speed_10m,wind_gusts_10m,cape",
+        )
+        .addQueryParameter("minutely_15", "precipitation")
+        .addQueryParameter("past_minutely_15", "4")
+        .addQueryParameter("forecast_minutely_15", "16")
         .addQueryParameter(
             "daily",
             "sunrise,sunset,temperature_2m_max,temperature_2m_min,uv_index_max,precipitation_sum",
@@ -83,7 +92,7 @@ class WeatherRepository(
         .build().toString()
 
     private fun multiModelUrl(place: Place): String = baseUrl(place)
-        .addQueryParameter("hourly", "wind_speed_10m,wind_gusts_10m")
+        .addQueryParameter("hourly", "wind_speed_10m,wind_gusts_10m,precipitation")
         .addQueryParameter("models", WEATHER_MODELS.joinToString(",") { it.first })
         .build().toString()
 
@@ -114,6 +123,8 @@ class WeatherRepository(
         val w80 = g("wind_speed_80m")
         val w120 = g("wind_speed_120m")
         val w180 = g("wind_speed_180m")
+        val wCode = g("weather_code")
+        val cape = g("cape")
 
         // Multi-model data is matched to the blended forecast by timestamp, not by index.
         val mh = multi?.get("hourly") as? JsonObject
@@ -126,6 +137,10 @@ class WeatherRepository(
             label to mh?.doubles("wind_gusts_10m_$id")
         }
 
+        val mPrecip = WEATHER_MODELS.associate { (id, label) ->
+            label to mh?.doubles("precipitation_$id")
+        }
+
         val hours = times.indices.map { i ->
             val t = times[i]
             val mi = mTimeIndex[t]
@@ -133,6 +148,8 @@ class WeatherRepository(
                 mWind.mapNotNull { (label, arr) -> arr?.getOrNull(mi)?.let { label to it } }.toMap()
             val gusts = if (mi == null) emptyList() else
                 mGust.values.mapNotNull { it?.getOrNull(mi) }
+            val perModelPrecip: Map<String, Double> = if (mi == null) emptyMap() else
+                mPrecip.mapNotNull { (label, arr) -> arr?.getOrNull(mi)?.let { label to it } }.toMap()
 
             val wind = if (perModel.isNotEmpty()) perModel.values.average() else gWind.getOrNull(i)
             HourPoint(
@@ -146,6 +163,8 @@ class WeatherRepository(
                 cloudPct = cloud.getOrNull(i),
                 uv = uv.getOrNull(i),
                 visibilityMi = vis.getOrNull(i)?.let { it / 1609.34 },
+                weatherCode = wCode.getOrNull(i)?.toInt(),
+                cape = cape.getOrNull(i),
                 windMph = wind,
                 windMinMph = if (perModel.size > 1) perModel.values.min() else wind,
                 windMaxMph = if (perModel.size > 1) perModel.values.max() else wind,
@@ -155,8 +174,33 @@ class WeatherRepository(
                 wind120 = w120.getOrNull(i),
                 wind180 = w180.getOrNull(i),
                 modelWind = perModel,
+                modelPrecip = perModelPrecip,
             )
         }
+
+        val current = (general["current"] as? JsonObject)?.let { c ->
+            fun num(key: String) = (c[key] as? JsonPrimitive)?.doubleOrNull
+            val t = (c["time"] as? JsonPrimitive)?.content ?: return@let null
+            CurrentConditions(
+                time = LocalDateTime.parse(t),
+                tempF = num("temperature_2m"),
+                feelsF = num("apparent_temperature"),
+                precip15In = num("precipitation"),
+                weatherCode = num("weather_code")?.toInt(),
+                windMph = num("wind_speed_10m"),
+                gustMph = num("wind_gusts_10m"),
+                cape = num("cape"),
+            )
+        }
+
+        val minutely = (general["minutely_15"] as? JsonObject)?.let { m ->
+            val mt = m.strings("time")
+            val mp = m.doubles("precipitation")
+            mt.indices.mapNotNull { i ->
+                val v = mp.getOrNull(i) ?: return@mapNotNull null
+                RainSlot(LocalDateTime.parse(mt[i]), v)
+            }
+        } ?: emptyList()
 
         val gd = general["daily"] as? JsonObject
         val days = gd?.let { d ->
@@ -187,6 +231,8 @@ class WeatherRepository(
             days = days,
             utcOffsetSeconds = offset,
             hasModelComparison = hours.any { it.modelWind.size > 1 },
+            current = current,
+            minutely = minutely,
         )
     }
 
