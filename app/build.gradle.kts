@@ -13,8 +13,21 @@ android {
         applicationId = "com.techwiz.myweather"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI passes its run number so every build is newer than the last one.
+        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionName = "0.2.0"
+    }
+
+    // One fixed key for every build. Without this, each CI run signs with a brand-new random
+    // debug key, and Android refuses to install a build over an earlier one ("App not installed").
+    // This is a throwaway sideload key, not a Play Store release key.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
