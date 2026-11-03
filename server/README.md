@@ -94,3 +94,10 @@ docker compose down               # stop (data is kept in the 'data' volume)
   which requires attribution (the app credits the models).
 - This server covers **forecast numbers only**. Radar, satellite, the base map and official alerts
   still come from other free services (listed in the app under **Data**).
+
+## TrueNAS
+
+Use `docker-compose.truenas.yml` (same services, TrueNAS-friendly defaults) on a Docker-based
+TrueNAS (24.10 or newer, from memory; older k3s-based SCALE and TrueNAS CORE do not run Docker
+compose files). In the web UI: **Apps → Discover Apps → Custom App → Install via YAML**, paste the file,
+and save. The comments at the top of that file cover the port and storage choices.

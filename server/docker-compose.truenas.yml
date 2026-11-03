@@ -1,0 +1,80 @@
+# Open-Meteo weather server for TrueNAS (Docker-based TrueNAS: Apps -> Discover Apps -> Custom App ->
+# "Install via YAML"). Paste this whole file in. Same services as docker-compose.yml.
+#
+# BEFORE YOU PASTE:
+#  1. Port: the API listens on host port 8080. If another app already uses 8080, change the left
+#     number in "8080:8080" (e.g. "8090:8080") and use that port in the phone app.
+#  2. Storage: by default data lives in a Docker volume that TrueNAS keeps on your Apps pool, which
+#     avoids file-permission trouble. To keep it in a dataset you manage (snapshots, quotas), create
+#     a dataset (e.g. /mnt/tank/openmeteo) and swap in the "bind mount" lines marked below.
+#  3. 'sync-elevation' runs once and exits. TrueNAS may show the app as having a stopped container
+#     afterwards; that is expected. You can delete that service after it has finished once.
+#
+# Test from any computer on your network once the first downloads finish:
+#   curl "http://TRUENAS-IP:8080/v1/forecast?latitude=36.06&longitude=-94.16&models=ecmwf_ifs025,gfs_seamless,icon_seamless&hourly=temperature_2m,precipitation,wind_speed_10m"
+
+x-sync: &sync
+  image: ghcr.io/open-meteo/open-meteo
+  volumes:
+    - data:/app/data
+    # bind mount instead (replace the line above):  - /mnt/tank/openmeteo/data:/app/data
+  restart: unless-stopped
+  environment:
+    LOG_LEVEL: info
+
+services:
+  open-meteo-api:
+    image: ghcr.io/open-meteo/open-meteo
+    container_name: open-meteo-api
+    command: serve
+    ports:
+      - "8080:8080"   # home network / Tailscale only. Do NOT port-forward to the internet.
+    volumes:
+      - data:/app/data
+      # bind mount instead (replace the line above):  - /mnt/tank/openmeteo/data:/app/data
+    restart: unless-stopped
+
+  # One-time: elevation data (improves forecasts in hills and valleys). Exits when done.
+  sync-elevation:
+    <<: *sync
+    restart: "no"
+    command: sync copernicus_dem90 static
+
+  sync-ecmwf:
+    <<: *sync
+    command: >-
+      sync ecmwf_ifs025 temperature_2m,relative_humidity_2m,precipitation,snowfall_water_equivalent,cloud_cover,wind_u_component_10m,wind_v_component_10m,wind_gusts_10m,shortwave_radiation,cape,pressure_msl --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-gfs013:
+    <<: *sync
+    command: >-
+      sync ncep_gfs013 temperature_2m,relative_humidity_2m,precipitation,snowfall_water_equivalent,cloud_cover,shortwave_radiation,uv_index,uv_index_clear_sky,wind_u_component_10m,wind_v_component_10m --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-gfs025:
+    <<: *sync
+    command: >-
+      sync ncep_gfs025 cape,lifted_index,visibility,wind_gusts_10m,pressure_msl,freezing_level_height,wind_u_component_80m,wind_v_component_80m --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-icon:
+    <<: *sync
+    command: >-
+      sync dwd_icon temperature_2m,relative_humidity_2m,precipitation,rain,showers,snowfall_water_equivalent,cloud_cover,weather_code,cape,wind_gusts_10m,wind_u_component_10m,wind_v_component_10m,wind_u_component_80m,wind_v_component_80m,wind_u_component_120m,wind_v_component_120m,wind_u_component_180m,wind_v_component_180m,direct_radiation,diffuse_radiation,pressure_msl,freezing_level_height --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-hrrr:
+    <<: *sync
+    command: >-
+      sync ncep_hrrr_conus temperature_2m,relative_humidity_2m,precipitation,snowfall_water_equivalent,cloud_cover,shortwave_radiation,visibility,cape,lifted_index,wind_gusts_10m,wind_u_component_10m,wind_v_component_10m,wind_u_component_80m,wind_v_component_80m,pressure_msl,freezing_level_height --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-hrrr15:
+    <<: *sync
+    command: >-
+      sync ncep_hrrr_conus_15min precipitation,temperature_2m,visibility,wind_gusts_10m,wind_u_component_10m,wind_v_component_10m --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-ensembles:
+    <<: *sync
+    command: >-
+      sync ncep_gefs025,ecmwf_ifs025_ensemble,dwd_icon_eps precipitation_probability --past-days 3 --repeat-interval 10 --concurrent 4
+
+# If you use bind mounts above, delete this 'volumes:' block.
+volumes:
+  data:
