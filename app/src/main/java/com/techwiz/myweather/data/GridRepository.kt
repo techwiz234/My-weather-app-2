@@ -58,6 +58,23 @@ class GridRepository(private val client: OkHttpClient = OkHttpClient()) {
     suspend fun fetch(
         south: Double, north: Double, west: Double, east: Double,
         cols: Int = 9, rows: Int = 6,
+        servers: List<WeatherServer> = listOf(WeatherServer.PUBLIC),
+    ): Grid {
+        var last: Exception? = null
+        for (server in servers) {
+            try {
+                return fetchFrom(server.baseUrl, south, north, west, east, cols, rows)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw last ?: IllegalStateException("No weather server configured")
+    }
+
+    private suspend fun fetchFrom(
+        base: String, south: Double, north: Double, west: Double, east: Double, cols: Int, rows: Int,
     ): Grid {
         val s = south.coerceIn(-85.0, 85.0)
         val n = north.coerceIn(-85.0, 85.0)
@@ -71,7 +88,7 @@ class GridRepository(private val client: OkHttpClient = OkHttpClient()) {
             lats += s + (r + 0.5) * latStep
             lons += w + (c + 0.5) * lonStep
         }
-        val url = "https://api.open-meteo.com/v1/forecast".toHttpUrl().newBuilder()
+        val url = "$base/v1/forecast".toHttpUrl().newBuilder()
             .addQueryParameter("latitude", lats.joinToString(",") { "%.3f".format(it) })
             .addQueryParameter("longitude", lons.joinToString(",") { "%.3f".format(it) })
             .addQueryParameter("hourly", "cloud_cover,wind_speed_10m,wind_direction_10m,precipitation")
@@ -85,7 +102,10 @@ class GridRepository(private val client: OkHttpClient = OkHttpClient()) {
             val req = Request.Builder().url(url).header("User-Agent", "MyWeatherApp/0.2").build()
             client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) error("Map data returned HTTP ${resp.code}")
+                if (!resp.isSuccessful) {
+                    val reason = Regex("\"reason\":\"([^\"]+)").find(text)?.groupValues?.get(1)
+                    error("Map data: ${reason ?: "HTTP ${resp.code}"}")
+                }
                 text
             }
         }

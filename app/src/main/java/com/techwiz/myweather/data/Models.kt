@@ -89,6 +89,8 @@ data class Forecast(
     val hasModelComparison: Boolean,
     val current: CurrentConditions? = null,
     val minutely: List<RainSlot> = emptyList(),
+    /** Which weather server produced this forecast (shown in the UI). */
+    val source: String = "",
 ) {
     /** Current time at the place, in the place's own time zone. */
     fun localNow(): LocalDateTime = LocalDateTime.now(ZoneOffset.ofTotalSeconds(utcOffsetSeconds))

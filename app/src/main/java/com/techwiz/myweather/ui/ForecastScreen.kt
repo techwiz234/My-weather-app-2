@@ -185,7 +185,7 @@ fun ForecastScreen(
         }
         item {
             Text(
-                "Forecast data: Open-Meteo (ECMWF, NOAA GFS, DWD ICON). Wind shown is at 10 m." +
+                "Models: ECMWF, NOAA GFS, DWD ICON via ${fc.source.ifEmpty { "Open-Meteo" }}. Wind shown is at 10 m." +
                     (state.lastUpdated?.let { " Updated ${java.time.format.DateTimeFormatter.ofPattern("h:mm a", Locale.US).format(it.atZone(java.time.ZoneId.systemDefault()))}." } ?: ""),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

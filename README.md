@@ -5,7 +5,7 @@ kites (down to 1 m), drone/RC, hiking, biking, offroad, and everyday weather.
 
 - **Data:** [Open-Meteo](https://open-meteo.com) (ECMWF, NOAA GFS, DWD ICON), free for non-commercial use, no API key.
 - **Map:** MapLibre with a free OpenStreetMap-based basemap. Search or tap anywhere on Earth.
-- **No server needed:** the app talks to the weather APIs directly.
+- **Unlimited data:** run your own Open-Meteo server at home (`server/`) and the app uses it (Data tab). Without one it falls back to the public API, which has daily limits.
 
 ## Build
 

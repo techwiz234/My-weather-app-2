@@ -10,6 +10,7 @@
         android:allowBackup="true"
         android:label="My Weather"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.MyWeather">
         <activity
             android:name=".MainActivity"

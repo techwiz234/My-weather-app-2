@@ -13,6 +13,8 @@ import com.techwiz.myweather.data.GridRepository
 import com.techwiz.myweather.data.Place
 import com.techwiz.myweather.data.RadarRepository
 import com.techwiz.myweather.data.RasterFrames
+import com.techwiz.myweather.data.ServerTest
+import com.techwiz.myweather.data.WeatherServer
 import com.techwiz.myweather.data.WeatherRepository
 import com.techwiz.myweather.domain.Profile
 import com.techwiz.myweather.domain.Settings
@@ -70,6 +72,12 @@ data class UiState(
     val hasGps: Boolean = false,
 
     val alerts: AlertsStatus = AlertsStatus.Unknown,
+
+    // Where weather data comes from
+    val serverUrl: String = "",
+    val useFallback: Boolean = true,
+    val testing: Boolean = false,
+    val serverTest: ServerTest? = null,
 
     // Map
     val camera: Viewport? = null,
@@ -129,6 +137,8 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
                     Place(prefs.getString("name", "Saved place") ?: "Saved place", lat.toDouble(), lon.toDouble(), prefs.getString("sub", "") ?: "")
                 else it.place,
                 profile = profile ?: it.profile,
+                serverUrl = prefs.getString("server_url", "") ?: "",
+                useFallback = prefs.getBoolean("use_fallback", true),
             )
         }
     }
@@ -136,6 +146,42 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
     private fun savePlace(p: Place) {
         prefs.edit().putFloat("lat", p.lat.toFloat()).putFloat("lon", p.lon.toFloat())
             .putString("name", p.name).putString("sub", p.subtitle).apply()
+    }
+
+    // ---- Data source ------------------------------------------------------------------------
+
+    /** Home server first (if set), then optionally the public API as a safety net. */
+    private fun servers(): List<WeatherServer> {
+        val st = _state.value
+        val url = normalizeServerUrl(st.serverUrl)
+        return when {
+            url.isEmpty() -> listOf(WeatherServer.PUBLIC)
+            st.useFallback -> listOf(
+                WeatherServer("Your server", url),
+                WeatherServer("Public Open-Meteo (fallback; has daily limits)", WeatherServer.PUBLIC_URL),
+            )
+            else -> listOf(WeatherServer("Your server", url))
+        }
+    }
+
+    fun setServerUrl(raw: String) {
+        prefs.edit().putString("server_url", raw.trim()).apply()
+        _state.update { it.copy(serverUrl = raw.trim(), serverTest = null, grid = null) }
+        refresh()
+    }
+
+    fun setUseFallback(enabled: Boolean) {
+        prefs.edit().putBoolean("use_fallback", enabled).apply()
+        _state.update { it.copy(useFallback = enabled) }
+    }
+
+    fun testServer(raw: String) {
+        viewModelScope.launch {
+            _state.update { it.copy(testing = true, serverTest = null) }
+            val base = normalizeServerUrl(raw).ifEmpty { WeatherServer.PUBLIC_URL }
+            val result = repo.test(base)
+            _state.update { it.copy(testing = false, serverTest = result) }
+        }
     }
 
     // ---- Forecast ---------------------------------------------------------------------------
@@ -147,7 +193,7 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
         loadJob = viewModelScope.launch {
             if (!quiet) _state.update { it.copy(loading = true, error = null) }
             try {
-                val fc = repo.forecast(place)
+                val fc = repo.forecast(place, servers())
                 _state.update { it.copy(forecast = fc, loading = false, error = null, lastUpdated = Instant.now()) }
             } catch (e: CancellationException) {
                 throw e
@@ -247,7 +293,7 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _state.update { it.copy(searching = true, searchError = null) }
             try {
-                val results = repo.search(q)
+                val results = deviceSearch(q).ifEmpty { repo.search(q) }
                 _state.update {
                     it.copy(
                         searching = false,
@@ -260,6 +306,23 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Exception) {
                 _state.update { it.copy(searching = false, searchError = e.message ?: "Search failed") }
             }
+        }
+    }
+
+    /** Place search through Android's built-in geocoder: no key and no quota of ours. */
+    @Suppress("DEPRECATION")
+    private suspend fun deviceSearch(query: String): List<Place> = withContext(Dispatchers.IO) {
+        try {
+            if (!Geocoder.isPresent()) return@withContext emptyList()
+            Geocoder(getApplication<Application>(), Locale.getDefault())
+                .getFromLocationName(query, 8).orEmpty().mapNotNull { a ->
+                    if (!a.hasLatitude() || !a.hasLongitude()) return@mapNotNull null
+                    val name = a.featureName ?: a.locality ?: return@mapNotNull null
+                    val sub = listOfNotNull(a.locality?.takeIf { it != name }, a.adminArea, a.countryName).joinToString(", ")
+                    Place(name, a.latitude, a.longitude, sub)
+                }
+        } catch (e: Exception) {
+            emptyList()
         }
     }
 
@@ -343,6 +406,7 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
                 val rows = Math.round(60.0 / cols).toInt().coerceIn(4, 12)
                 val fetched = gridRepo.fetch(
                     v.south - padLat, v.north + padLat, v.west - padLon, v.east + padLon, cols, rows,
+                    servers = servers(),
                 )
                 val cellPx = minOf(
                     v.widthPx * 1.3f / cols,
@@ -365,4 +429,11 @@ fun formatCoordinates(lat: Double, lon: Double): String {
     val ns = if (lat >= 0) "N" else "S"
     val ew = if (lon >= 0) "E" else "W"
     return "%.2f°%s, %.2f°%s".format(abs(lat), ns, abs(lon), ew)
+}
+
+/** "192.168.1.20:8080" -> "http://192.168.1.20:8080"; blank stays blank. */
+fun normalizeServerUrl(raw: String): String {
+    val t = raw.trim().trimEnd('/')
+    if (t.isEmpty()) return ""
+    return if (t.startsWith("http://") || t.startsWith("https://")) t else "http://$t"
 }

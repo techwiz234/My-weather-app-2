@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Place
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -38,6 +39,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.techwiz.myweather.ui.AlertsDialog
+import com.techwiz.myweather.ui.DataScreen
 import com.techwiz.myweather.ui.ForecastScreen
 import com.techwiz.myweather.ui.MapActions
 import com.techwiz.myweather.ui.MapScreen
@@ -55,7 +57,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tab { MAP, FORECAST }
+private enum class Tab { MAP, FORECAST, DATA }
 
 private val LOCATION_PERMISSIONS = arrayOf(
     Manifest.permission.ACCESS_FINE_LOCATION,
@@ -110,7 +112,7 @@ private fun App(vm: WeatherViewModel = viewModel()) {
         }
     }
 
-    BackHandler(enabled = tab == Tab.FORECAST) { tab = Tab.MAP }
+    BackHandler(enabled = tab != Tab.MAP) { tab = Tab.MAP }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -127,6 +129,12 @@ private fun App(vm: WeatherViewModel = viewModel()) {
                     onClick = { tab = Tab.FORECAST },
                     icon = { Icon(Icons.Default.Menu, contentDescription = null) },
                     label = { Text("Forecast") },
+                )
+                NavigationBarItem(
+                    selected = tab == Tab.DATA,
+                    onClick = { tab = Tab.DATA },
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    label = { Text("Data") },
                 )
             }
         },
@@ -160,6 +168,13 @@ private fun App(vm: WeatherViewModel = viewModel()) {
                     onGroundFactor = vm::setGroundFactor,
                     onRefresh = { vm.refresh() },
                     onAlertClick = { showAlerts = true },
+                )
+
+                Tab.DATA -> DataScreen(
+                    state = state,
+                    onSaveUrl = vm::setServerUrl,
+                    onTest = vm::testServer,
+                    onFallback = vm::setUseFallback,
                 )
             }
         }

@@ -18,9 +18,21 @@ import okhttp3.Request
 import java.time.LocalDate
 import java.time.LocalDateTime
 
+/** A weather API server: the public Open-Meteo API or one you host yourself. */
+data class WeatherServer(val label: String, val baseUrl: String) {
+    companion object {
+        const val PUBLIC_URL = "https://api.open-meteo.com"
+        val PUBLIC = WeatherServer("Open-Meteo public API", PUBLIC_URL)
+    }
+}
+
+/** Outcome of the "Test connection" button. */
+data class ServerTest(val ok: Boolean, val message: String)
+
 /**
- * Talks to Open-Meteo (free, no API key, non-commercial use). Everything is requested in
- * imperial units.
+ * Talks to an Open-Meteo-compatible API (free, no API key). Everything is requested in imperial
+ * units. The same requests work against the public API and against a self-hosted server, which
+ * is how the app avoids depending on anyone's usage limits.
  */
 class WeatherRepository(
     private val client: OkHttpClient = OkHttpClient(),
@@ -46,18 +58,65 @@ class WeatherRepository(
         }
     }
 
-    suspend fun forecast(place: Place): Forecast = coroutineScope {
-        val general = async { Json.parseToJsonElement(get(generalUrl(place))).jsonObject }
-        val multi = async {
-            runCatching { Json.parseToJsonElement(get(multiModelUrl(place))).jsonObject }.getOrNull()
+    /**
+     * Tries each server in order and returns the first forecast that loads. If every server fails,
+     * the error names each one so you can see which is broken (e.g. a rate-limit message).
+     */
+    suspend fun forecast(place: Place, servers: List<WeatherServer>): Forecast {
+        val errors = mutableListOf<String>()
+        for (server in servers) {
+            try {
+                return forecastFrom(place, server)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                errors += "${server.label}: ${e.message ?: "failed"}"
+            }
         }
-        parseForecast(place, general.await(), multi.await())
+        error(errors.joinToString("\n").ifEmpty { "No weather server configured" })
+    }
+
+    private suspend fun forecastFrom(place: Place, server: WeatherServer): Forecast = coroutineScope {
+        val general = async { Json.parseToJsonElement(get(generalUrl(place, server.baseUrl))).jsonObject }
+        val multi = async {
+            runCatching { Json.parseToJsonElement(get(multiModelUrl(place, server.baseUrl))).jsonObject }.getOrNull()
+        }
+        parseForecast(place, general.await(), multi.await()).copy(source = server.label)
+    }
+
+    /** Quick health check used by the Data settings screen. */
+    suspend fun test(baseUrl: String): ServerTest {
+        val started = System.currentTimeMillis()
+        return try {
+            val url = "$baseUrl/v1/forecast".toHttpUrl().newBuilder()
+                .addQueryParameter("latitude", "36.06")
+                .addQueryParameter("longitude", "-94.16")
+                .addQueryParameter("hourly", "temperature_2m,precipitation")
+                .addQueryParameter("models", WEATHER_MODELS.joinToString(",") { it.first })
+                .addQueryParameter("forecast_days", "2")
+                .build().toString()
+            val root = Json.parseToJsonElement(get(url)).jsonObject
+            val hourly = root["hourly"] as? JsonObject ?: return ServerTest(false, "Server answered, but not with a forecast")
+            val ms = System.currentTimeMillis() - started
+            val withData = WEATHER_MODELS.filter { (id, _) ->
+                hourly.doubles("temperature_2m_$id").any { it != null }
+            }.map { it.second }
+            if (withData.isEmpty()) {
+                ServerTest(false, "Reachable (${ms} ms) but returned no data yet. A new server needs time to download models.")
+            } else {
+                val missing = WEATHER_MODELS.map { it.second } - withData.toSet()
+                ServerTest(true, "Working (${ms} ms). Models with data: ${withData.joinToString()}" +
+                    if (missing.isNotEmpty()) ". Still missing: ${missing.joinToString()}" else "")
+            }
+        } catch (e: Exception) {
+            ServerTest(false, e.message ?: "Couldn't connect")
+        }
     }
 
     // ---- URLs -------------------------------------------------------------------------------
 
-    private fun baseUrl(place: Place) =
-        "https://api.open-meteo.com/v1/forecast".toHttpUrl().newBuilder()
+    private fun baseUrl(place: Place, base: String) =
+        "$base/v1/forecast".toHttpUrl().newBuilder()
             .addQueryParameter("latitude", place.lat.toString())
             .addQueryParameter("longitude", place.lon.toString())
             .addQueryParameter("timezone", "auto")
@@ -66,7 +125,7 @@ class WeatherRepository(
             .addQueryParameter("temperature_unit", "fahrenheit")
             .addQueryParameter("precipitation_unit", "inch")
 
-    private fun generalUrl(place: Place): String = baseUrl(place)
+    private fun generalUrl(place: Place, base: String): String = baseUrl(place, base)
         .addQueryParameter(
             "hourly",
             listOf(
@@ -91,7 +150,7 @@ class WeatherRepository(
         )
         .build().toString()
 
-    private fun multiModelUrl(place: Place): String = baseUrl(place)
+    private fun multiModelUrl(place: Place, base: String): String = baseUrl(place, base)
         .addQueryParameter("hourly", "wind_speed_10m,wind_gusts_10m,precipitation")
         .addQueryParameter("models", WEATHER_MODELS.joinToString(",") { it.first })
         .build().toString()
@@ -242,7 +301,12 @@ class WeatherRepository(
         val request = Request.Builder().url(url).header("User-Agent", "MyWeatherApp/0.1").build()
         client.newCall(request).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) error("Weather service returned HTTP ${resp.code}")
+            if (!resp.isSuccessful) {
+                val reason = runCatching {
+                    (Json.parseToJsonElement(body).jsonObject["reason"] as? JsonPrimitive)?.content
+                }.getOrNull()
+                error(reason ?: "HTTP ${resp.code}")
+            }
             body
         }
     }

@@ -1,0 +1,72 @@
+# Your own weather server: a private copy of the Open-Meteo API, no usage limits.
+#
+# Start:   docker compose up -d
+# Watch:   docker compose logs -f
+# Test:    curl "http://localhost:8080/v1/forecast?latitude=36.06&longitude=-94.16&models=ecmwf_ifs025,gfs_seamless,icon_seamless&hourly=temperature_2m,precipitation,wind_speed_10m"
+#
+# Model and variable names below were each checked against Open-Meteo's open-data bucket.
+# Commands follow Open-Meteo's own self-hosting docs (github.com/open-meteo/open-meteo, docs/getting-started.md).
+# The 'sync' services download model data and keep it fresh; the 'open-meteo-api' service serves it.
+
+x-sync: &sync
+  image: ghcr.io/open-meteo/open-meteo
+  volumes:
+    - data:/app/data
+  restart: always
+  environment:
+    LOG_LEVEL: info
+
+services:
+  open-meteo-api:
+    image: ghcr.io/open-meteo/open-meteo
+    container_name: open-meteo-api
+    command: serve
+    ports:
+      - "8080:8080"   # reachable on your home network / Tailscale. Do NOT port-forward this to the internet.
+    volumes:
+      - data:/app/data
+    restart: always
+
+  # One-time: elevation data (improves forecasts in hills and valleys). Exits when done.
+  sync-elevation:
+    <<: *sync
+    restart: "no"
+    command: sync copernicus_dem90 static
+
+  sync-ecmwf:
+    <<: *sync
+    command: >-
+      sync ecmwf_ifs025 temperature_2m,relative_humidity_2m,precipitation,snowfall_water_equivalent,cloud_cover,wind_u_component_10m,wind_v_component_10m,wind_gusts_10m,shortwave_radiation,cape,pressure_msl --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-gfs013:
+    <<: *sync
+    command: >-
+      sync ncep_gfs013 temperature_2m,relative_humidity_2m,precipitation,snowfall_water_equivalent,cloud_cover,shortwave_radiation,uv_index,uv_index_clear_sky,wind_u_component_10m,wind_v_component_10m --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-gfs025:
+    <<: *sync
+    command: >-
+      sync ncep_gfs025 cape,lifted_index,visibility,wind_gusts_10m,pressure_msl,freezing_level_height,wind_u_component_80m,wind_v_component_80m --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-icon:
+    <<: *sync
+    command: >-
+      sync dwd_icon temperature_2m,relative_humidity_2m,precipitation,rain,showers,snowfall_water_equivalent,cloud_cover,weather_code,cape,wind_gusts_10m,wind_u_component_10m,wind_v_component_10m,wind_u_component_80m,wind_v_component_80m,wind_u_component_120m,wind_v_component_120m,wind_u_component_180m,wind_v_component_180m,direct_radiation,diffuse_radiation,pressure_msl,freezing_level_height --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-hrrr:
+    <<: *sync
+    command: >-
+      sync ncep_hrrr_conus temperature_2m,relative_humidity_2m,precipitation,snowfall_water_equivalent,cloud_cover,shortwave_radiation,visibility,cape,lifted_index,wind_gusts_10m,wind_u_component_10m,wind_v_component_10m,wind_u_component_80m,wind_v_component_80m,pressure_msl,freezing_level_height --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-hrrr15:
+    <<: *sync
+    command: >-
+      sync ncep_hrrr_conus_15min precipitation,temperature_2m,visibility,wind_gusts_10m,wind_u_component_10m,wind_v_component_10m --past-days 3 --repeat-interval 10 --concurrent 4
+
+  sync-ensembles:
+    <<: *sync
+    command: >-
+      sync ncep_gefs025,ecmwf_ifs025_ensemble,dwd_icon_eps precipitation_probability --past-days 3 --repeat-interval 10 --concurrent 4
+
+volumes:
+  data:
