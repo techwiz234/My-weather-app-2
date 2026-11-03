@@ -31,6 +31,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.util.Locale
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
 import kotlin.math.abs
 
 val DEFAULT_PLACE = Place("Fayetteville", 36.0626, -94.1574, "Arkansas, United States")
@@ -75,6 +77,8 @@ data class UiState(
 
     // Where weather data comes from
     val serverUrl: String = "",
+    val accessId: String = "",
+    val accessSecret: String = "",
     val useFallback: Boolean = true,
     val testing: Boolean = false,
     val serverTest: ServerTest? = null,
@@ -94,11 +98,34 @@ data class UiState(
 )
 
 class WeatherViewModel(app: Application) : AndroidViewModel(app) {
-    private val repo = WeatherRepository()
-    private val alertsRepo = AlertsRepository()
-    private val gridRepo = GridRepository()
-    private val radarRepo = RadarRepository()
     private val prefs = app.getSharedPreferences("prefs", Context.MODE_PRIVATE)
+
+    // Cloudflare Access service token. Sent ONLY to the user's own server, never to other hosts.
+    @Volatile private var accessId = prefs.getString("access_id", "") ?: ""
+    @Volatile private var accessSecret = prefs.getString("access_secret", "") ?: ""
+    @Volatile private var serverHost: String? = null
+
+    private val http = OkHttpClient.Builder()
+        .addInterceptor { chain ->
+            val req = chain.request()
+            val host = serverHost
+            if (host != null && req.url.host == host && accessId.isNotEmpty() && accessSecret.isNotEmpty()) {
+                chain.proceed(
+                    req.newBuilder()
+                        .header("CF-Access-Client-Id", accessId)
+                        .header("CF-Access-Client-Secret", accessSecret)
+                        .build(),
+                )
+            } else {
+                chain.proceed(req)
+            }
+        }
+        .build()
+
+    private val repo = WeatherRepository(http)
+    private val alertsRepo = AlertsRepository()
+    private val gridRepo = GridRepository(http)
+    private val radarRepo = RadarRepository()
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -111,6 +138,7 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
     private var viewport: Viewport? = null
 
     init {
+        serverHost = normalizeServerUrl(prefs.getString("server_url", "") ?: "").toHttpUrlOrNull()?.host
         loadSaved()
         refresh()
         // Keep alerts and "right now" conditions fresh while the app is open.
@@ -138,6 +166,8 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
                 else it.place,
                 profile = profile ?: it.profile,
                 serverUrl = prefs.getString("server_url", "") ?: "",
+                accessId = prefs.getString("access_id", "") ?: "",
+                accessSecret = prefs.getString("access_secret", "") ?: "",
                 useFallback = prefs.getBoolean("use_fallback", true),
             )
         }
@@ -164,7 +194,15 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun setAccessToken(id: String, secret: String) {
+        accessId = id.trim()
+        accessSecret = secret.trim()
+        prefs.edit().putString("access_id", accessId).putString("access_secret", accessSecret).apply()
+        _state.update { it.copy(accessId = accessId, accessSecret = accessSecret, serverTest = null) }
+    }
+
     fun setServerUrl(raw: String) {
+        serverHost = normalizeServerUrl(raw).toHttpUrlOrNull()?.host
         prefs.edit().putString("server_url", raw.trim()).apply()
         _state.update { it.copy(serverUrl = raw.trim(), serverTest = null, grid = null) }
         refresh()
@@ -179,6 +217,7 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _state.update { it.copy(testing = true, serverTest = null) }
             val base = normalizeServerUrl(raw).ifEmpty { WeatherServer.PUBLIC_URL }
+            serverHost = normalizeServerUrl(raw).toHttpUrlOrNull()?.host
             val result = repo.test(base)
             _state.update { it.copy(testing = false, serverTest = result) }
         }

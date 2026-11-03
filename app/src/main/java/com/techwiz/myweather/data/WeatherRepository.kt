@@ -301,6 +301,13 @@ class WeatherRepository(
         val request = Request.Builder().url(url).header("User-Agent", "MyWeatherApp/0.1").build()
         client.newCall(request).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
+            // Cloudflare Access answers an unauthenticated request with a redirect to its login page.
+            if (resp.request.url.host != request.url.host) {
+                error("Blocked by the server's login (${resp.request.url.host}). Check the Access token on the Data tab.")
+            }
+            if (resp.code == 401 || resp.code == 403) {
+                error("Server refused the request (HTTP ${resp.code}). Check the Access token on the Data tab.")
+            }
             if (!resp.isSuccessful) {
                 val reason = runCatching {
                     (Json.parseToJsonElement(body).jsonObject["reason"] as? JsonPrimitive)?.content

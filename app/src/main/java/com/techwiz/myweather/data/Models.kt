@@ -16,7 +16,7 @@ data class Place(
 val WEATHER_MODELS: List<Pair<String, String>> = listOf(
     "ecmwf_ifs025" to "ECMWF",
     "gfs_seamless" to "GFS",
-    "icon_seamless" to "ICON",
+    "icon_global" to "ICON",
 )
 
 /**

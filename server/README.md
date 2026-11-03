@@ -101,3 +101,22 @@ Use `docker-compose.truenas.yml` (same services, TrueNAS-friendly defaults) on a
 TrueNAS (24.10 or newer, from memory; older k3s-based SCALE and TrueNAS CORE do not run Docker
 compose files). In the web UI: **Apps → Discover Apps → Custom App → Install via YAML**, paste the file,
 and save. The comments at the top of that file cover the port and storage choices.
+
+## Cloudflare Tunnel + Access (instead of Tailscale)
+
+Publishing the server on your own domain through a Cloudflare Tunnel works, but the server itself has
+no password, so **the address is open to the whole internet unless you protect it**. Protect it with
+Cloudflare Access:
+
+1. Zero Trust dashboard -> Access -> Service credentials -> create a **service token**; copy the
+   Client ID and Secret (the secret is shown once).
+2. Access -> Applications -> add a **self-hosted** application for your hostname
+   (e.g. `weather.example.com`) with a policy whose action is **Service Auth** that includes only
+   that token.
+3. In the weather app: Data tab -> Server address `https://weather.example.com`, paste the Client ID
+   and Secret, **Save**, **Test**.
+4. Check from a computer with no token: `curl -i https://weather.example.com/v1/forecast?latitude=0&longitude=0&hourly=temperature_2m`
+   must be refused (a redirect to a login page or a 403), **not** return weather data.
+
+The tunnel's service URL must be `http://<truenas-ip>:<host-port>` (or `http://open-meteo-api:8080`
+from inside the same compose network).

@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 
 /** Where the weather numbers come from, and a way to point the app at your own server. */
@@ -36,11 +37,14 @@ import androidx.compose.ui.unit.dp
 fun DataScreen(
     state: UiState,
     onSaveUrl: (String) -> Unit,
+    onSaveToken: (String, String) -> Unit,
     onTest: (String) -> Unit,
     onFallback: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var url by remember { mutableStateOf(state.serverUrl) }
+    var tokenId by remember { mutableStateOf(state.accessId) }
+    var tokenSecret by remember { mutableStateOf(state.accessSecret) }
 
     Column(
         modifier
@@ -73,9 +77,34 @@ fun DataScreen(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Text("Cloudflare Access token (optional)", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "If your server is behind Cloudflare Access, paste the service token's Client ID and " +
+                        "Secret. They are sent only to your server's address.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = tokenId,
+                    onValueChange = { tokenId = it },
+                    label = { Text("Client ID") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = tokenSecret,
+                    onValueChange = { tokenSecret = it },
+                    label = { Text("Client Secret") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Button(onClick = { onSaveUrl(url) }) { Text("Save") }
-                    OutlinedButton(onClick = { onTest(url) }, enabled = !state.testing) { Text("Test") }
+                    Button(onClick = { onSaveToken(tokenId, tokenSecret); onSaveUrl(url) }) { Text("Save") }
+                    OutlinedButton(
+                        onClick = { onSaveToken(tokenId, tokenSecret); onTest(url) },
+                        enabled = !state.testing,
+                    ) { Text("Test") }
                     if (state.testing) CircularProgressIndicator(Modifier.padding(start = 4.dp), strokeWidth = 2.dp)
                 }
                 state.serverTest?.let {

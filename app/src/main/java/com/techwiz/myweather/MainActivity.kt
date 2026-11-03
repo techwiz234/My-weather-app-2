@@ -173,6 +173,7 @@ private fun App(vm: WeatherViewModel = viewModel()) {
                 Tab.DATA -> DataScreen(
                     state = state,
                     onSaveUrl = vm::setServerUrl,
+                    onSaveToken = vm::setAccessToken,
                     onTest = vm::testServer,
                     onFallback = vm::setUseFallback,
                 )
