@@ -20,13 +20,16 @@ data class RasterFrames(
     val maxZoom: Float,
     /** Index of the "now" frame, where the loop should rest when paused. */
     val nowIndex: Int,
+    val tileSize: Int = 256,
 )
 
 /**
  * Where observed radar / satellite imagery comes from. Both feeds are free and need no key.
  *
- *  - Radar: RainViewer's global composite (past frames, plus short nowcast frames when offered).
- *    If it can't be reached, falls back to the Iowa Environmental Mesonet NEXRAD mosaic (US only).
+ *  - Radar over the contiguous US: the Iowa Environmental Mesonet NEXRAD mosaic, requested as
+ *    full-resolution WMS images, so it stays sharp when you zoom in (no coarse pre-made tiles).
+ *  - Radar elsewhere: RainViewer's global composite, without its blur filter. If either can't be
+ *    reached the other is tried.
  *  - Satellite: NASA GIBS, GOES-East "GeoColor" (Americas).
  *
  * NOTE: these endpoints could not be tested from the build sandbox; they follow each provider's
@@ -34,7 +37,9 @@ data class RasterFrames(
  */
 class RadarRepository(private val client: OkHttpClient = OkHttpClient()) {
 
-    suspend fun radar(): RasterFrames {
+    suspend fun radar(centerLat: Double, centerLon: Double): RasterFrames {
+        val inUs = centerLat in 24.0..50.0 && centerLon in -125.0..-66.0
+        if (inUs) return iemNexrad()
         val rv = runCatching { rainViewer() }.getOrNull()
         if (rv != null && rv.urls.isNotEmpty()) return rv
         return iemNexrad()
@@ -74,7 +79,7 @@ class RadarRepository(private val client: OkHttpClient = OkHttpClient()) {
         val all = past + nowcast
         val nowSecs = Instant.now().epochSecond
         return RasterFrames(
-            urls = all.map { (_, path) -> "$host$path/256/{z}/{x}/{y}/2/1_1.png" },
+            urls = all.map { (_, path) -> "$host$path/256/{z}/{x}/{y}/2/0_1.png" },
             labels = all.map { (t, _) ->
                 val mins = (t - nowSecs) / 60
                 if (kotlin.math.abs(mins) < 3) "now" else if (mins < 0) "${-mins} min ago" else "in $mins min"
@@ -86,11 +91,16 @@ class RadarRepository(private val client: OkHttpClient = OkHttpClient()) {
     }
 
     private fun iemNexrad(): RasterFrames {
-        val base = "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0"
+        // WMS GetMap: the server draws each 512 px tile from the full-resolution composite.
+        fun wms(layer: String) =
+            "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi?SERVICE=WMS&VERSION=1.1.1" +
+                "&REQUEST=GetMap&LAYERS=$layer&STYLES=&FORMAT=image/png&TRANSPARENT=true" +
+                "&SRS=EPSG:3857&WIDTH=512&HEIGHT=512&BBOX={bbox-epsg-3857}"
         val offsets = (50 downTo 5 step 5).toList()
-        val urls = offsets.map { "$base/nexrad-n0q-900913-m%02dm/{z}/{x}/{y}.png".format(it) } +
-            "$base/nexrad-n0q-900913/{z}/{x}/{y}.png"
+        val urls = offsets.map { wms("nexrad-n0q-900913-m%02dm".format(it)) } + wms("nexrad-n0q-900913")
         val labels = offsets.map { "$it min ago" } + "now"
-        return RasterFrames(urls, labels, "Iowa Environmental Mesonet · NEXRAD (US only)", 9f, urls.lastIndex)
+        return RasterFrames(
+            urls, labels, "NEXRAD radar · Iowa Environmental Mesonet (US)", 14f, urls.lastIndex, tileSize = 512,
+        )
     }
 }

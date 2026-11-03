@@ -159,6 +159,8 @@ private fun App(vm: WeatherViewModel = viewModel()) {
                         onFrame = vm::setFrame,
                         onMyLocation = ::onMyLocation,
                         onAlertClick = { showAlerts = true },
+                        onMoving = vm::setMapMoving,
+                        onBasemap = vm::setBasemap,
                     ),
                 )
 

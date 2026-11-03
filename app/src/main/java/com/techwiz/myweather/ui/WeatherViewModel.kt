@@ -46,6 +46,11 @@ enum class MapLayer(val label: String) {
     SATELLITE("Satellite"),
 }
 
+enum class Basemap(val label: String, val styleUrl: String, val dark: Boolean) {
+    STANDARD("Standard", "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json", false),
+    DARK("Dark", "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json", true),
+}
+
 val MapLayer.usesGrid get() = this == MapLayer.WIND || this == MapLayer.CLOUDS || this == MapLayer.RAIN
 val MapLayer.usesRaster get() = this == MapLayer.RADAR || this == MapLayer.SATELLITE
 
@@ -86,6 +91,9 @@ data class UiState(
     // Map
     val camera: Viewport? = null,
     val layer: MapLayer = MapLayer.NONE,
+    val basemap: Basemap = Basemap.STANDARD,
+    /** True while the camera is moving (gesture or animation); wind particles hide until it settles. */
+    val mapMoving: Boolean = false,
     val grid: Grid? = null,
     val gridLoading: Boolean = false,
     val gridError: String? = null,
@@ -165,6 +173,7 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
                     Place(prefs.getString("name", "Saved place") ?: "Saved place", lat.toDouble(), lon.toDouble(), prefs.getString("sub", "") ?: "")
                 else it.place,
                 profile = profile ?: it.profile,
+                basemap = runCatching { Basemap.valueOf(prefs.getString("basemap", "") ?: "") }.getOrNull() ?: it.basemap,
                 serverUrl = prefs.getString("server_url", "") ?: "",
                 accessId = prefs.getString("access_id", "") ?: "",
                 accessSecret = prefs.getString("access_secret", "") ?: "",
@@ -374,7 +383,10 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
         animJob?.cancel()
         when {
             layer.usesGrid -> ensureGrid(force = false)
-            layer == MapLayer.RADAR -> loadFrames { radarRepo.radar() }
+            layer == MapLayer.RADAR -> {
+                val v = viewport ?: _state.value.camera
+                loadFrames { radarRepo.radar(v?.centerLat ?: _state.value.place.lat, v?.centerLon ?: _state.value.place.lon) }
+            }
             layer == MapLayer.SATELLITE -> loadFrames { radarRepo.satellite() }
             else -> Unit
         }
@@ -410,6 +422,15 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun setBasemap(b: Basemap) {
+        prefs.edit().putString("basemap", b.name).apply()
+        _state.update { it.copy(basemap = b) }
+    }
+
+    fun setMapMoving(moving: Boolean) {
+        if (_state.value.mapMoving != moving) _state.update { it.copy(mapMoving = moving) }
+    }
+
     fun togglePlaying() = _state.update { it.copy(playing = !it.playing) }
 
     fun setFrame(i: Int) = _state.update { it.copy(frameIndex = i, playing = false) }
@@ -439,19 +460,11 @@ class WeatherViewModel(app: Application) : AndroidViewModel(app) {
             delay(500) // debounce while the user is still moving
             _state.update { it.copy(gridLoading = true, gridError = null) }
             try {
-                // Aim for ~60 points, laid out to match the screen's shape so spacing is even.
-                val aspect = v.widthPx.toDouble() / v.heightPx.coerceAtLeast(1)
-                val cols = Math.round(Math.sqrt(60 * aspect)).toInt().coerceIn(4, 12)
-                val rows = Math.round(60.0 / cols).toInt().coerceIn(4, 12)
-                val fetched = gridRepo.fetch(
-                    v.south - padLat, v.north + padLat, v.west - padLon, v.east + padLon, cols, rows,
+                val grid = gridRepo.fetch(
+                    v.south - padLat, v.north + padLat, v.west - padLon, v.east + padLon,
+                    aspect = v.widthPx.toDouble() / v.heightPx.coerceAtLeast(1),
                     servers = servers(),
                 )
-                val cellPx = minOf(
-                    v.widthPx * 1.3f / cols,
-                    v.heightPx * 1.3f / rows,
-                )
-                val grid = fetched.copy(refZoom = v.zoom, cellPx = cellPx)
                 _state.update {
                     it.copy(grid = grid, gridLoading = false, gridHour = if (it.grid == null) grid.nowIndex() else it.gridHour.coerceIn(0, grid.times.lastIndex))
                 }

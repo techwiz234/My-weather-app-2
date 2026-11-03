@@ -74,9 +74,10 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
-// Free vector basemap (OpenStreetMap data, CARTO styling). Attribution is shown by MapLibre.
-private const val BASE_STYLE = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+// Free vector basemaps (OpenStreetMap data, CARTO styling). Attribution is shown by MapLibre.
 private const val SEL_SOURCE = "selected-place-src"
 private const val SEL_LAYER = "selected-place-layer"
 
@@ -95,12 +96,21 @@ class MapActions(
     val onFrame: (Int) -> Unit,
     val onMyLocation: () -> Unit,
     val onAlertClick: () -> Unit,
+    val onMoving: (Boolean) -> Unit,
+    val onBasemap: (Basemap) -> Unit,
 )
 
 @Composable
 fun MapScreen(state: UiState, actions: MapActions, modifier: Modifier = Modifier) {
     Box(modifier.fillMaxSize()) {
         WeatherMap(state = state, actions = actions, modifier = Modifier.fillMaxSize())
+
+        // Windy-style flowing wind particles, drawn only once the camera has settled.
+        val grid = state.grid
+        val cam = state.camera
+        if (state.layer == MapLayer.WIND && grid != null && cam != null && !state.mapMoving) {
+            WindParticles(grid, state.gridHour, cam, Modifier.fillMaxSize())
+        }
 
         Column(
             Modifier
@@ -124,7 +134,14 @@ fun MapScreen(state: UiState, actions: MapActions, modifier: Modifier = Modifier
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                SmallFloatingActionButton(
+                    onClick = {
+                        actions.onBasemap(if (state.basemap == Basemap.STANDARD) Basemap.DARK else Basemap.STANDARD)
+                    },
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.primary,
+                ) { Text("◐", style = MaterialTheme.typography.titleLarge) }
                 SmallFloatingActionButton(
                     onClick = actions.onMyLocation,
                     containerColor = MaterialTheme.colorScheme.surface,
@@ -270,8 +287,8 @@ private fun TimeControl(state: UiState, actions: MapActions) {
 }
 
 private fun layerLegend(layer: MapLayer) = when (layer) {
-    MapLayer.WIND -> "arrows point downwind · green ≈10 mph, yellow 20, red 30+"
-    MapLayer.CLOUDS -> "cloud cover (white = overcast)"
+    MapLayer.WIND -> "wind speed (mph): blue calm · green 12 · yellow 23 · red 40"
+    MapLayer.CLOUDS -> "cloud cover: darker/whiter = thicker"
     MapLayer.RAIN -> "rain rate: blue light → green → yellow → red heavy"
     else -> ""
 }
@@ -394,7 +411,12 @@ private fun WeatherMap(state: UiState, actions: MapActions, modifier: Modifier) 
 
     LaunchedEffect(mapView) {
         mapView.getMapAsync { m ->
-            // Restore where the user was looking if they come back from the forecast screen.
+            // Wind particles are positioned in screen space, so keep north up and the map flat.
+            m.uiSettings.isRotateGesturesEnabled = false
+            m.uiSettings.isTiltGesturesEnabled = false
+            m.uiSettings.isCompassEnabled = false
+
+            // Restore where the user was looking if they come back from another screen.
             val cam = state.camera
             m.cameraPosition = CameraPosition.Builder()
                 .target(if (cam != null) LatLng(cam.centerLat, cam.centerLon) else LatLng(place.lat, place.lon))
@@ -404,11 +426,12 @@ private fun WeatherMap(state: UiState, actions: MapActions, modifier: Modifier) 
                 currentActions.onTap(latLng.latitude, latLng.longitude)
                 true
             }
+            m.addOnCameraMoveStartedListener { currentActions.onMoving(true) }
             m.addOnCameraIdleListener {
                 val b = m.projection.visibleRegion.latLngBounds
                 val c = m.cameraPosition
-                val target = c.target ?: return@addOnCameraIdleListener
-                if (mapView.width > 0 && mapView.height > 0) {
+                val target = c.target
+                if (target != null && mapView.width > 0 && mapView.height > 0) {
                     currentActions.onViewport(
                         Viewport(
                             south = b.latitudeSouth, north = b.latitudeNorth,
@@ -418,21 +441,29 @@ private fun WeatherMap(state: UiState, actions: MapActions, modifier: Modifier) 
                         ),
                     )
                 }
-            }
-            m.setStyle(BASE_STYLE) { s ->
-                s.addSource(GeoJsonSource(SEL_SOURCE))
-                s.addLayer(
-                    CircleLayer(SEL_LAYER, SEL_SOURCE).withProperties(
-                        circleRadius(9f),
-                        circleColor("#4FC3F7"),
-                        circleStrokeColor("#FFFFFF"),
-                        circleStrokeWidth(2.5f),
-                    ),
-                )
-                overlay = OverlayController(s, SEL_LAYER)
-                style = s
+                currentActions.onMoving(false)
             }
             map = m
+        }
+    }
+
+    // (Re)load the base map whenever the chosen style changes; overlays are rebuilt afterwards.
+    LaunchedEffect(map, state.basemap) {
+        val m = map ?: return@LaunchedEffect
+        overlay = null
+        style = null
+        m.setStyle(state.basemap.styleUrl) { s ->
+            s.addSource(GeoJsonSource(SEL_SOURCE))
+            s.addLayer(
+                CircleLayer(SEL_LAYER, SEL_SOURCE).withProperties(
+                    circleRadius(9f),
+                    circleColor("#4FC3F7"),
+                    circleStrokeColor("#FFFFFF"),
+                    circleStrokeWidth(2.5f),
+                ),
+            )
+            overlay = OverlayController(s, SEL_LAYER)
+            style = s
         }
     }
 
@@ -448,12 +479,19 @@ private fun WeatherMap(state: UiState, actions: MapActions, modifier: Modifier) 
     }
 
     // Weather overlays.
-    LaunchedEffect(overlay, state.layer, state.grid, state.gridHour, state.frames, state.frameIndex) {
+    LaunchedEffect(overlay, state.layer, state.grid, state.gridHour, state.frames, state.frameIndex, state.basemap) {
         val o = overlay ?: return@LaunchedEffect
         when {
             state.layer.usesGrid -> {
                 val g = state.grid
-                if (g != null) o.showGrid(state.layer, g, state.gridHour) else o.clear()
+                if (g == null) {
+                    o.clear()
+                } else {
+                    val bmp = withContext(Dispatchers.Default) {
+                        FieldRenderer.render(state.layer, g, state.gridHour, state.basemap.dark)
+                    }
+                    if (bmp != null) o.showPicture(bmp, g, 1f) else o.clear()
+                }
             }
             state.layer.usesRaster -> {
                 val f = state.frames

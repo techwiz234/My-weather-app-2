@@ -1,7 +1,18 @@
 package com.techwiz.myweather.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import com.techwiz.myweather.domain.plainSummary
+import com.techwiz.myweather.domain.rainGlance
+import com.techwiz.myweather.domain.rainHeadline
+import com.techwiz.myweather.domain.uvGlance
+import com.techwiz.myweather.domain.weatherEmoji
+import com.techwiz.myweather.domain.windGlance
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -117,40 +128,66 @@ fun ForecastScreen(
     val verdicts: List<Verdict?> = remember(hours, profile, settings) {
         hours.map { evaluate(profile, it, settings) }
     }
+    val outlook = remember(fc) { buildRainOutlook(fc) }
+    val summary = remember(fc) { plainSummary(fc, outlook) }
+
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    // Which detail sections are open. Everything starts collapsed so the page reads at a glance.
+    var open by remember { mutableStateOf(setOf<String>()) }
+    fun toggle(key: String) { open = if (key in open) open - key else open + key }
+    fun reveal(key: String, itemIndex: Int) {
+        open = open + key
+        scope.launch { listState.animateScrollToItem(itemIndex) }
+    }
 
     LazyColumn(
+        state = listState,
         modifier = modifier.fillMaxSize().statusBarsPadding(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
+        // 0
         item { AlertsBanner(state.alerts, onAlertClick, showAllClear = true) }
+        // 1: the headline: where, how warm, what it's doing, and what to expect today.
+        item { HeroCard(fc, hours, summary, state.lastUpdated) }
+        // 2: the three numbers people actually check. Tap one to jump to its details.
         item {
-            Column {
-                Text(fc.place.name, style = MaterialTheme.typography.headlineMedium)
-                if (fc.place.subtitle.isNotEmpty()) {
-                    Text(
-                        fc.place.subtitle,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+            GlanceTiles(
+                rain = rainGlance(outlook, fc),
+                wind = windGlance(fc, hours),
+                uv = uvGlance(hours),
+                raining = outlook.rainingNow,
+                windMph = fc.current?.windMph ?: hours.firstOrNull()?.windMph ?: 0.0,
+                uvNow = hours.firstOrNull()?.uv ?: 0.0,
+                onRain = { reveal("rain", 4) },
+                onWind = { reveal("wind", 5) },
+                onUv = { reveal("uv", 6) },
+            )
+        }
+        // 3
+        item {
+            SectionCard("Next 48 hours") {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(hours.size.coerceAtMost(48)) { i -> HourCell(hours[i], verdicts[i]) }
                 }
             }
         }
+        // 4, 5, 6: details, one tap away
+        item { RainCard(fc, outlook, "rain" in open) { toggle("rain") } }
+        item { WindCard(hours, fc.hasModelComparison, windGlance(fc, hours), "wind" in open) { toggle("wind") } }
+        item { SunUvCard(fc, hours, uvGlance(hours), "uv" in open) { toggle("uv") } }
+
+        // 7+: hobbies
+        item { Text("Your activities", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 6.dp)) }
         item {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(Profile.entries) { p ->
-                    FilterChip(
-                        selected = p == profile,
-                        onClick = { onProfile(p) },
-                        label = { Text(p.label) },
-                    )
+                    FilterChip(selected = p == profile, onClick = { onProfile(p) }, label = { Text(p.label) })
                 }
             }
         }
-        item { NowCard(fc, hours) }
-        item { RainCard(fc) }
         item { SummaryCard(profile, hours, verdicts) }
-
         if (profile == Profile.KITE) {
             item {
                 KiteCard(
@@ -162,22 +199,8 @@ fun ForecastScreen(
             }
         }
 
-        item { WindCard(hours, hasComparison = fc.hasModelComparison) }
-
-        item { SunUvCard(fc, hours) }
-
         item {
-            SectionCard("Hour by hour") {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(hours.size.coerceAtMost(48)) { i ->
-                        HourCell(hours[i], verdicts[i])
-                    }
-                }
-            }
-        }
-
-        item {
-            SectionCard("7-day outlook") {
+            SectionCard("Next 7 days") {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     fc.days.forEach { DayRow(it) }
                 }
@@ -185,12 +208,145 @@ fun ForecastScreen(
         }
         item {
             Text(
-                "Models: ECMWF, NOAA GFS, DWD ICON via ${fc.source.ifEmpty { "Open-Meteo" }}. Wind shown is at 10 m." +
-                    (state.lastUpdated?.let { " Updated ${java.time.format.DateTimeFormatter.ofPattern("h:mm a", Locale.US).format(it.atZone(java.time.ZoneId.systemDefault()))}." } ?: ""),
+                "Models: ECMWF, NOAA GFS, DWD ICON via ${fc.source.ifEmpty { "Open-Meteo" }}. Wind is measured at 10 m.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 24.dp),
             )
+        }
+    }
+}
+
+// ---- Top of the page -----------------------------------------------------------------------
+
+@Composable
+private fun HeroCard(fc: Forecast, hours: List<HourPoint>, summary: String, updated: java.time.Instant?) {
+    val cur = fc.current
+    val h0 = hours.firstOrNull()
+    val temp = cur?.tempF ?: h0?.tempF
+    val feels = cur?.feelsF ?: h0?.feelsF
+    val code = cur?.weatherCode ?: h0?.weatherCode
+    val today = fc.days.firstOrNull { it.date == fc.localNow().toLocalDate() } ?: fc.days.firstOrNull()
+    Card(
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
+                Column(Modifier.weight(1f)) {
+                    Text(fc.place.name, style = MaterialTheme.typography.titleLarge)
+                    if (fc.place.subtitle.isNotEmpty()) {
+                        Text(fc.place.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                updated?.let {
+                    Text(
+                        "Updated " + DateTimeFormatter.ofPattern("h:mm a", Locale.US).format(it.atZone(java.time.ZoneId.systemDefault())),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text(weatherEmoji(code, h0?.isDay ?: true), fontSize = 52.sp)
+                Text(temp?.let { "${it.roundToInt()}°" } ?: "–", style = MaterialTheme.typography.displayLarge)
+                Column {
+                    Text(weatherCodeText(code), style = MaterialTheme.typography.titleMedium)
+                    feels?.let { Text("Feels like ${it.roundToInt()}°", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    today?.let {
+                        Text(
+                            "H ${it.tempMaxF?.roundToInt() ?: "–"}°  ·  L ${it.tempMinF?.roundToInt() ?: "–"}°",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            Text(summary, style = MaterialTheme.typography.bodyLarge)
+        }
+    }
+}
+
+@Composable
+private fun GlanceTiles(
+    rain: com.techwiz.myweather.domain.Glance,
+    wind: com.techwiz.myweather.domain.Glance,
+    uv: com.techwiz.myweather.domain.Glance,
+    raining: Boolean,
+    windMph: Double,
+    uvNow: Double,
+    onRain: () -> Unit,
+    onWind: () -> Unit,
+    onUv: () -> Unit,
+) {
+    val rainColor = if (raining) Color(0xFF64B5F6) else GoColor
+    val windColor = when { windMph >= 25 -> NoGoColor; windMph >= 15 -> CautionColor; else -> GoColor }
+    val uvColor = when { uvNow >= 8 -> NoGoColor; uvNow >= 3 -> CautionColor; else -> GoColor }
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        GlanceTile("RAIN", rain, rainColor, Modifier.weight(1f), onRain)
+        GlanceTile("WIND", wind, windColor, Modifier.weight(1f), onWind)
+        GlanceTile("UV", uv, uvColor, Modifier.weight(1f), onUv)
+    }
+}
+
+@Composable
+private fun GlanceTile(
+    label: String,
+    g: com.techwiz.myweather.domain.Glance,
+    accent: Color,
+    modifier: Modifier,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(accent))
+            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text(g.value, style = MaterialTheme.typography.titleLarge, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+        Text(
+            g.sub,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 4,
+        )
+    }
+}
+
+/** A card whose header (title + one-line summary) is always visible; tap to open the details. */
+@Composable
+private fun DetailSection(
+    title: String,
+    summary: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Column {
+            Row(
+                Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(title, style = MaterialTheme.typography.titleMedium)
+                    Text(summary, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text(if (expanded) "▾" else "▸", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    content()
+                }
+            }
         }
     }
 }
@@ -299,8 +455,9 @@ private fun KiteCard(
 }
 
 @Composable
-private fun WindCard(hours: List<HourPoint>, hasComparison: Boolean) {
-    SectionCard("Wind by model (next 48 hours)") {
+private fun WindCard(hours: List<HourPoint>, hasComparison: Boolean, glance: com.techwiz.myweather.domain.Glance, expanded: Boolean, onToggle: () -> Unit) {
+    DetailSection("Wind", "${glance.value}, ${glance.sub}", expanded, onToggle) {
+        Text("By model, next 48 hours", style = MaterialTheme.typography.titleSmall)
         val agreement = windAgreement(hours.take(24))
         if (agreement != null) {
             Text(
@@ -437,6 +594,7 @@ private fun HourCell(h: HourPoint, v: Verdict?) {
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         Text(h.time.format(HOUR_FMT), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(weatherEmoji(h.weatherCode, h.isDay), fontSize = 20.sp)
         Text(h.tempF?.let { "${it.roundToInt()}°" } ?: "–", style = MaterialTheme.typography.titleMedium)
         // Arrow points the way the wind is blowing (direction data is where it comes FROM).
         Text("↑", Modifier.rotate(((h.windDirDeg ?: 0.0) + 180.0).toFloat()), color = MaterialTheme.colorScheme.primary)
@@ -532,22 +690,12 @@ private fun NowCard(fc: Forecast, hours: List<HourPoint>) {
 // ---- Rain ---------------------------------------------------------------------------------
 
 @Composable
-private fun RainCard(fc: Forecast) {
-    val o: RainOutlook = remember(fc) { buildRainOutlook(fc) }
+private fun RainCard(fc: Forecast, o: RainOutlook, expanded: Boolean, onToggle: () -> Unit) {
     val now = fc.localNow()
     var showInfo by remember { mutableStateOf(false) }
     val hour0 = fc.upcoming().firstOrNull()
 
-    SectionCard("Rain") {
-        // Headline: what is happening, then what comes next.
-        val nowcastNext = o.next.firstOrNull { !it.time.isBefore(now) && it.precipIn >= 0.004 }
-        val headline = when {
-            o.rainingNow -> "Raining now: ${o.nowIntensity.label.lowercase(Locale.US)}"
-            nowcastNext != null -> "Dry now, rain ${relativeTime(nowcastNext.time, now)}"
-            o.events.isNotEmpty() -> "Dry now. Next rain ${relativeTime(o.events.first().start, now)}"
-            else -> "No rain expected in the next 48 hours"
-        }
-        Text(headline, style = MaterialTheme.typography.titleLarge)
+    DetailSection("Rain", rainHeadline(o, fc), expanded, onToggle) {
         val sub = buildList {
             o.lastHourIn?.let { add("Past hour: ${"%.2f".format(it)} in") }
             hour0?.precipProb?.let { add("Chance this hour: ${it.roundToInt()}%") }
@@ -706,13 +854,13 @@ private fun NowcastBars(fc: Forecast, now: java.time.LocalDateTime) {
 // ---- UV & sun -----------------------------------------------------------------------------
 
 @Composable
-private fun SunUvCard(fc: Forecast, hours: List<HourPoint>) {
+private fun SunUvCard(fc: Forecast, hours: List<HourPoint>, glance: com.techwiz.myweather.domain.Glance, expanded: Boolean, onToggle: () -> Unit) {
     val today = fc.localNow().toLocalDate()
     val day = fc.days.firstOrNull { it.date == today } ?: fc.days.firstOrNull()
     val todays = fc.hours.filter { it.time.toLocalDate() == today && it.uv != null }
     val peak = todays.maxByOrNull { it.uv ?: 0.0 }
     val nowUv = hours.firstOrNull()?.uv
-    SectionCard("UV & sun") {
+    DetailSection("UV & sun", "${glance.value}. ${glance.sub}", expanded, onToggle) {
         Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
             Column {
                 Text("Now", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
